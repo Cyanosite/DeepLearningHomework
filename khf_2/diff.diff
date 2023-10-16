@@ -1,0 +1,502 @@
+--- eredeti.py  2023-10-16 15:29:36
++++ modositott.py       2023-10-16 15:29:38
+@@ -1,30 +1,30 @@
+ # MLP osztály létrehozása.
+ class MLP:
+ 
+-    def __init__(self, *args):
++    def __init__(self, *args, batch_size=10):  # batch_size parameter to define the batch size
+         """
+         A hálózat inicializálása az argumentumként megadott méretek alapján.
+         """
+-        # random seed megadása
+         np.random.seed(123)
+-        # A hálózat formája (rétegek száma), amely megegyezik a paraméterek számával
+         self.shape = args
+         n = len(args)
+-        # Rétegek létrehozása
+-        self.layers = []
+-        # Bemeneti réteg létrehozása (+1 egység a BIAS-nak)
+-        self.layers.append(np.ones(self.shape[0]+1))
+-        # Rejtett réteg(ek) és a kimeneti réteg létrehozása
+-        for i in range(1,n):
+-            self.layers.append(np.ones(self.shape[i]))
+-        # Súlymátrix létrehozása
++        self.batch_size: int = batch_size # store the batch_size
++        self.layers = list(range(self.batch_size))
++        # we create the layers batch_size times to
++        # store the steps in the forward propagation for each element of the batch
++
++        for i in range(self.batch_size):
++            self.layers[i] = []
++            self.layers[i].append(np.ones(self.shape[0]+1))
++        for j in range(self.batch_size):
++            for i in range(1,n):
++                self.layers[j].append(np.ones(self.shape[i]))
++
++        # for the weights we don't need to modify anything
+         self.weights = []
+         for i in range(n-1):
+-            self.weights.append(np.zeros((self.layers[i].size,
+-                                         self.layers[i+1].size)))
+-        # dw fogja tartalmazni a súlyok utolsó módosításait (később pl. a momentum módszer számára)
+-        self.dw = [0,]*len(self.weights)
+-        # Súlyok újrainicializálása
++            self.weights.append(np.zeros((self.layers[0][i].size,
++                                         self.layers[0][i+1].size)))
+         self.reset()
+ 
+     def reset(self):
+\ No newline at end of file
+@@ -32,26 +32,27 @@
+         Súlyok újrainicializálása [-1, 1) intervallum fölött vett egyenletes eloszlás mintavételezésével
+         """
+         for i in range(len(self.weights)):
+-            # véletlen számok [0,1) tartományban
+-            Z = np.random.random((self.layers[i].size,self.layers[i+1].size))
+-            # átskálázzuk a súlyokat [-1,1) tartományba
++            # along the first axis of layers all the sizes are the same so we just choose the 0th index
++            Z = np.random.random((self.layers[0][i].size,self.layers[0][i+1].size))
+             self.weights[i][...] = (2*Z-1)*1
+ 
+     def propagate_forward(self, data):
+         """
+         A bemenő adatok végigküldése a hálózaton, kimeneti rétegig (forward propagation)
+         """
+-        # Bemeneti réteg beállítása (tanító adatok)
+-        self.layers[0][0:-1] = data
+-        # Az adatok végigküldése a bemeneti rétegtől az utolsó előtti rétegig (az utolsó ugyanis a kimeneti réteg).
+-        # A szigmoid aktivációs függvény használatával, mátrixszorzások alkalmazásával.
+-        # Az előadáson a "layers" változót jelöltük "a"-val.
+-        for i in range(1,len(self.shape)):
+-            s_i = np.dot(self.layers[i-1], self.weights[i-1])
+-            self.layers[i][...] = activation(s_i)
+-        # Visszatérés a hálózat által becsült eredménnyel
+-        return self.layers[-1]
++        # for each element of the input data array we initialize the first layer of each batch
++        for i in range(self.batch_size):
++            self.layers[i][0][0:-1] = data[i]
+ 
++        # same forward propagation but for each batch
++        for j in range(self.batch_size):
++            for i in range(1,len(self.shape)):
++                    s_i = np.dot(self.layers[j][i-1], self.weights[i-1])
++                    self.layers[j][i] = activation(s_i)
++        # return the last layer of each batch, flattening is useful for error calculations later
++        # otherwise the shape would be (10, 1) which is undesirable
++        return np.array([self.layers[i][-1] for i in range(self.batch_size)]).flatten()
++
+     def propagate_backward(self, target, lrate=0.1):
+         """
+         Hibavisszaterjesztés (backpropagation) definiálása.
+\ No newline at end of file
+@@ -67,40 +68,37 @@
+         Returns: az aktuális kimenetek és elvárt értékek alapján számított (négyzetes) hiba
+         """
+         deltas = []
+-        # Hiba: 1/2 (y-y_kalap)**2
+-        # Hiba deriváltjának kiszámítása a kimeneti rétegen (dC/dy_kalap)
+-        derror = -(target-self.layers[-1]) # y-y_kalap
+-        # error*dactivation(s(3))
+-        s_last = np.dot(self.layers[-2],self.weights[-1])
+-        delta_last = derror * dactivation(s_last)
++
++        # derror calculation for each batch
++        derror = [-(target[i]-self.layers[i][-1]) for i in range(self.batch_size)] # y-y_kalap
++        # same stuff but for each batch again
++        s_last = [np.dot(self.layers[i][-2],self.weights[-1]) for i in range(self.batch_size)]
++        delta_last = [derror[i] * dactivation(s_last[i]) for i in range(self.batch_size)]
+         deltas.append(delta_last)
+-        # Gradiens kiszámítása a rejtett réteg(ek)ben
++        
+         for i in range(len(self.shape)-2,0,-1):
+-            s_i = np.dot(self.layers[i-1],self.weights[i-1])
+-            # pl. utolsó rejtett réteg: delta(3)*(W(2).T)*dactivation(s(2)) (lásd előadás)
+-            delta_i = np.dot(deltas[0],self.weights[i].T)*dactivation(s_i)
+-            # a háló eleje felé "lépkedünk, mindig a deltas tömb elejére szúrjuk be az aktuálisan kiszámítottat"
++            s_i = [np.dot(self.layers[j][i-1],self.weights[i-1]) for j in range(self.batch_size)]
++            delta_i = [np.dot(deltas[0][j],self.weights[i].T)*dactivation(s_i[j]) for j in range(self.batch_size)]
+             deltas.insert(0,delta_i)
+-        # Súlyok módosítása
++
+         for i in range(len(self.weights)):
+-            layer = np.atleast_2d(self.layers[i])
+-            delta = np.atleast_2d(deltas[i])
+-            # pl. utolsó rétegben: delta(3)*a(2) (lásd előadás)
+-            dw = -lrate*np.dot(layer.T,delta)
+-            # súlyok módosítása
++            layer = [np.atleast_2d(self.layers[j][i]) for j in range(self.batch_size)]
++            delta = [np.atleast_2d(deltas[i][j]) for j in range(self.batch_size)]
++            # here we calculate dw for each batch
++            dw = np.array([np.dot(layer[j].T,delta[j]) for j in range(self.batch_size)])
++            # we take the mean along the first axis, so for all the weigths along each batch
++            # and apply the learning rate to it
++            dw = -lrate * dw.mean(axis=0)
+             self.weights[i] += dw
+ 
+-            # a súlymódosítás eltárolása
+-            self.dw[i] = dw
+-
+-        # Visszatérés a hibával
+-        error = (target-self.layers[-1])**2
+-        return error.sum()
+-
++        # return the msq for each batch, flattening isn't needed as it is already of desired shape
++        error = np.array([(target[i]-self.layers[i][-1])**2 for i in range(self.batch_size)])
++        return error
++    
+ from sklearn import preprocessing
+-def learn(network, X, Y, valid_split, test_split, writer, epochs=20, lrate=0.1):
++def learn(network, X, Y, valid_split, test_split, writer, epochs=20, batch_size=10, lrate=0.1):
++        # we pass in the batch_size here, this has to be the same as the network batch_size otherwise it'll crash
+ 
+-        # train-validation-test minták különválasztása
+         nb_samples = len(Y)
+         X_train = X[0:int(nb_samples*(1-valid_split-test_split))]
+         Y_train = Y[0:int(nb_samples*(1-valid_split-test_split))]
+\ No newline at end of file
+@@ -109,38 +107,32 @@
+         X_test  = X[int(nb_samples*(1-test_split)):]
+         Y_test  = Y[int(nb_samples*(1-test_split)):]
+ 
+-        # standardizálás
+         scaler = preprocessing.StandardScaler().fit(X_train)
+         X_train = scaler.transform(X_train)
+         X_valid = scaler.transform(X_valid)
+         X_test  = scaler.transform(X_test)
+ 
+-        # ugyanolyan sorrendben keverjük be a bemeneteket és kimeneteket, a három külön adatbázisra
+         randperm = np.random.permutation(len(X_train))
+         X_train, Y_train = X_train[randperm], Y_train[randperm]
+ 
+ 
+-        # Tanítási fázis, epoch-szor megyünk át 1-1 véltelenszerűen kiválasztott mintán.
+         for i in range(epochs):
+-            # Jelen megoldás azt a módszert használja, hogy a megadott
+-            # tanító adatokon végigmegyünk és minden elemet először végigküldünk
+-            # a hálózaton, majd terjeszti vissza a kapott eltérést az
+-            # elvárt eredménytől. Ezt hívjuk SGD-ek (stochastic gradient descent).
++            # mini batch learning implemented here
+             train_err = 0
+-            for k in range(X_train.shape[0]):
+-                network.propagate_forward( X_train[k] )
+-                train_err += network.propagate_backward( Y_train[k], lrate )
++            for k in range(0, X_train.shape[0], batch_size):
++                # k : k+batch_size is one mini_batch
++                network.propagate_forward( np.array(X_train[k:k+batch_size]) )
++                # we add the errors together here and devide by the number of elements at the end
++                train_err += network.propagate_backward( np.array(Y_train[k:k+batch_size]), lrate ).sum()
+             train_err /= X_train.shape[0]
+ 
+-            # validációs fázis
++            # mini batch validation
+             valid_err = 0
+-            o_valid = np.zeros(X_valid.shape[0])
+-            for k in range(X_valid.shape[0]):
+-                o_valid[k] = network.propagate_forward(X_valid[k])
+-                valid_err += (o_valid[k]-Y_valid[k])**2
++            for k in range(0, X_valid.shape[0], batch_size):
++                last_layers = network.propagate_forward(X_valid[k:k+batch_size])
++                valid_err += ((last_layers-Y_valid[k:k+batch_size])**2).sum()
+             valid_err /= X_valid.shape[0]
+ 
+-
+             writer.add_scalar('train', scalar_value=train_err, global_step=i)
+             writer.add_scalar('validation', scalar_value=valid_err, global_step=i)
+             print("%d epoch, train_err: %.4f, valid_err: %.4f" % (i, train_err, valid_err))
+\ No newline at end of file
+@@ -149,15 +141,16 @@
+         print("\n--- TESZTELÉS ---\n")
+         test_err = 0
+         o_test = np.zeros(X_test.shape[0])
+-        for k in range(X_test.shape[0]):
+-            o_test[k] = network.propagate_forward(X_test[k])
+-            test_err += (o_test[k]-Y_test[k])**2
+-            print(k, X_test[k], '%.2f' % o_test[k], ' (elvart eredmeny: %.2f)' % Y_test[k])
++        for k in range(0, X_test.shape[0], batch_size):
++            o_test[k:k+batch_size] = network.propagate_forward(X_test[k:k+batch_size])
++            test_err += ((o_test[k:k+batch_size]-Y_test[k:k+batch_size])**2).sum()
++            for i in range(batch_size):
++                print(k, X_test[k+i], '%.2f' % o_test[k+i], ' (elvart eredmeny: %.2f)' % Y_test[k+i])
+         test_err /= X_test.shape[0]
+ 
+         plt.scatter(X_test[:,0], X_test[:,1], c=np.round(o_test[:]), cmap=plt.cm.coolwarm)
+ 
+-def decision_boundary_plot(network, X):
++def decision_boundary_plot(network, X, batch_size: int = 10):
+     """
+     Háló kimenet illusztrálása a bemeneti sík "minden" (sok) pontjára
+     Döntési határ közelítő megjelenítése
+\ No newline at end of file
+@@ -174,8 +167,8 @@
+ 
+     # Háló kimenet kiértékelése a rácspontokban
+     Y_test2 = np.empty(X_test2.shape[0])
+-    for i in range(X_test2.shape[0]):
+-        Y_test2[i] = network.propagate_forward(X_test2[i,:])
++    for i in range(0, X_test2.shape[0], batch_size):
++        Y_test2[i:i+batch_size] = network.propagate_forward(X_test2[i:i+batch_size,:])
+     Y_test2_grid = np.reshape(Y_test2, (res,-1))
+     # Ábrázolás
+     plt.imshow(Y_test2_grid, cmap=plt.cm.coolwarm, origin='lower', extent=[-lims-0.5, lims+.5, -lims-0.5, lims+0.5], vmax=1 ,vmin=-0)
+\ No newline at end of file
+@@ -199,8 +192,8 @@
+     X_test  = X[int(nb_samples*(1-test_split)):]
+     # Y_test  = Y[int(nb_samples*(1-test_split)):]
+     O_test = np.zeros(X_test.shape[0])
+-    for k in range(X_test.shape[0]):
+-        O_test[k] = network.propagate_forward(X_test[k])
++    for k in range(0, X_test.shape[0], batch_size):
++        O_test[k:k+batch_size] = network.propagate_forward(X_test[k:k+batch_size])
+     plt.scatter(X_test[:,0], X_test[:,1], c=np.round(O_test[:]), cmap=plt.cm.bwr, linewidth=1, edgecolors='w')
+ 
+ decision_boundary_plot(network, X)
+\ No newline at end of file
+cyanosite@Zsombors-MacBook-Air khf_2 % diff --color=auto -u eredeti.py modositott.py
+--- eredeti.py  2023-10-16 15:50:11
++++ modositott.py       2023-10-16 15:50:16
+@@ -1,30 +1,30 @@
+ # MLP osztály létrehozása.
+ class MLP:
+ 
+-    def __init__(self, *args):
++    def __init__(self, *args, batch_size=10):  # batch_size parameter to define the batch size
+         """
+         A hálózat inicializálása az argumentumként megadott méretek alapján.
+         """
+-        # random seed megadása
+         np.random.seed(123)
+-        # A hálózat formája (rétegek száma), amely megegyezik a paraméterek számával
+         self.shape = args
+         n = len(args)
+-        # Rétegek létrehozása
+-        self.layers = []
+-        # Bemeneti réteg létrehozása (+1 egység a BIAS-nak)
+-        self.layers.append(np.ones(self.shape[0]+1))
+-        # Rejtett réteg(ek) és a kimeneti réteg létrehozása
+-        for i in range(1,n):
+-            self.layers.append(np.ones(self.shape[i]))
+-        # Súlymátrix létrehozása
++        self.batch_size: int = batch_size # store the batch_size
++        self.layers = list(range(self.batch_size))
++        # we create the layers batch_size times to
++        # store the steps in the forward propagation for each element of the batch
++
++        for i in range(self.batch_size):
++            self.layers[i] = []
++            self.layers[i].append(np.ones(self.shape[0]+1))
++        for j in range(self.batch_size):
++            for i in range(1,n):
++                self.layers[j].append(np.ones(self.shape[i]))
++
++        # for the weights we don't need to modify anything
+         self.weights = []
+         for i in range(n-1):
+-            self.weights.append(np.zeros((self.layers[i].size,
+-                                         self.layers[i+1].size)))
+-        # dw fogja tartalmazni a súlyok utolsó módosításait (később pl. a momentum módszer számára)
+-        self.dw = [0,]*len(self.weights)
+-        # Súlyok újrainicializálása
++            self.weights.append(np.zeros((self.layers[0][i].size,
++                                         self.layers[0][i+1].size)))
+         self.reset()
+ 
+     def reset(self):
+@@ -32,26 +32,27 @@
+         Súlyok újrainicializálása [-1, 1) intervallum fölött vett egyenletes eloszlás mintavételezésével
+         """
+         for i in range(len(self.weights)):
+-            # véletlen számok [0,1) tartományban
+-            Z = np.random.random((self.layers[i].size,self.layers[i+1].size))
+-            # átskálázzuk a súlyokat [-1,1) tartományba
++            # along the first axis of layers all the sizes are the same so we just choose the 0th index
++            Z = np.random.random((self.layers[0][i].size,self.layers[0][i+1].size))
+             self.weights[i][...] = (2*Z-1)*1
+ 
+     def propagate_forward(self, data):
+         """
+         A bemenő adatok végigküldése a hálózaton, kimeneti rétegig (forward propagation)
+         """
+-        # Bemeneti réteg beállítása (tanító adatok)
+-        self.layers[0][0:-1] = data
+-        # Az adatok végigküldése a bemeneti rétegtől az utolsó előtti rétegig (az utolsó ugyanis a kimeneti réteg).
+-        # A szigmoid aktivációs függvény használatával, mátrixszorzások alkalmazásával.
+-        # Az előadáson a "layers" változót jelöltük "a"-val.
+-        for i in range(1,len(self.shape)):
+-            s_i = np.dot(self.layers[i-1], self.weights[i-1])
+-            self.layers[i][...] = activation(s_i)
+-        # Visszatérés a hálózat által becsült eredménnyel
+-        return self.layers[-1]
++        # for each element of the input data array we initialize the first layer of each batch
++        for i in range(self.batch_size):
++            self.layers[i][0][0:-1] = data[i]
+ 
++        # same forward propagation but for each batch
++        for j in range(self.batch_size):
++            for i in range(1,len(self.shape)):
++                    s_i = np.dot(self.layers[j][i-1], self.weights[i-1])
++                    self.layers[j][i] = activation(s_i)
++        # return the last layer of each batch, flattening is useful for error calculations later
++        # otherwise the shape would be (10, 1) which is undesirable
++        return np.array([self.layers[i][-1] for i in range(self.batch_size)]).flatten()
++
+     def propagate_backward(self, target, lrate=0.1):
+         """
+         Hibavisszaterjesztés (backpropagation) definiálása.
+@@ -67,40 +68,37 @@
+         Returns: az aktuális kimenetek és elvárt értékek alapján számított (négyzetes) hiba
+         """
+         deltas = []
+-        # Hiba: 1/2 (y-y_kalap)**2
+-        # Hiba deriváltjának kiszámítása a kimeneti rétegen (dC/dy_kalap)
+-        derror = -(target-self.layers[-1]) # y-y_kalap
+-        # error*dactivation(s(3))
+-        s_last = np.dot(self.layers[-2],self.weights[-1])
+-        delta_last = derror * dactivation(s_last)
++
++        # derror calculation for each batch
++        derror = [-(target[i]-self.layers[i][-1]) for i in range(self.batch_size)] # y-y_kalap
++        # same stuff but for each batch again
++        s_last = [np.dot(self.layers[i][-2],self.weights[-1]) for i in range(self.batch_size)]
++        delta_last = [derror[i] * dactivation(s_last[i]) for i in range(self.batch_size)]
+         deltas.append(delta_last)
+-        # Gradiens kiszámítása a rejtett réteg(ek)ben
++        
+         for i in range(len(self.shape)-2,0,-1):
+-            s_i = np.dot(self.layers[i-1],self.weights[i-1])
+-            # pl. utolsó rejtett réteg: delta(3)*(W(2).T)*dactivation(s(2)) (lásd előadás)
+-            delta_i = np.dot(deltas[0],self.weights[i].T)*dactivation(s_i)
+-            # a háló eleje felé "lépkedünk, mindig a deltas tömb elejére szúrjuk be az aktuálisan kiszámítottat"
++            s_i = [np.dot(self.layers[j][i-1],self.weights[i-1]) for j in range(self.batch_size)]
++            delta_i = [np.dot(deltas[0][j],self.weights[i].T)*dactivation(s_i[j]) for j in range(self.batch_size)]
+             deltas.insert(0,delta_i)
+-        # Súlyok módosítása
++
+         for i in range(len(self.weights)):
+-            layer = np.atleast_2d(self.layers[i])
+-            delta = np.atleast_2d(deltas[i])
+-            # pl. utolsó rétegben: delta(3)*a(2) (lásd előadás)
+-            dw = -lrate*np.dot(layer.T,delta)
+-            # súlyok módosítása
++            layer = [np.atleast_2d(self.layers[j][i]) for j in range(self.batch_size)]
++            delta = [np.atleast_2d(deltas[i][j]) for j in range(self.batch_size)]
++            # here we calculate dw for each batch
++            dw = np.array([np.dot(layer[j].T,delta[j]) for j in range(self.batch_size)])
++            # we take the mean along the first axis, so for all the weigths along each batch
++            # and apply the learning rate to it
++            dw = -lrate * dw.mean(axis=0)
+             self.weights[i] += dw
+ 
+-            # a súlymódosítás eltárolása
+-            self.dw[i] = dw
+-
+-        # Visszatérés a hibával
+-        error = (target-self.layers[-1])**2
+-        return error.sum()
+-
++        # return the msq for each batch, flattening isn't needed as it is already of desired shape
++        error = np.array([(target[i]-self.layers[i][-1])**2 for i in range(self.batch_size)])
++        return error
++    
+ from sklearn import preprocessing
+-def learn(network, X, Y, valid_split, test_split, writer, epochs=20, lrate=0.1):
++def learn(network, X, Y, valid_split, test_split, writer, epochs=20, batch_size=10, lrate=0.1):
++        # we pass in the batch_size here, this has to be the same as the network batch_size otherwise it'll crash
+ 
+-        # train-validation-test minták különválasztása
+         nb_samples = len(Y)
+         X_train = X[0:int(nb_samples*(1-valid_split-test_split))]
+         Y_train = Y[0:int(nb_samples*(1-valid_split-test_split))]
+@@ -109,38 +107,32 @@
+         X_test  = X[int(nb_samples*(1-test_split)):]
+         Y_test  = Y[int(nb_samples*(1-test_split)):]
+ 
+-        # standardizálás
+         scaler = preprocessing.StandardScaler().fit(X_train)
+         X_train = scaler.transform(X_train)
+         X_valid = scaler.transform(X_valid)
+         X_test  = scaler.transform(X_test)
+ 
+-        # ugyanolyan sorrendben keverjük be a bemeneteket és kimeneteket, a három külön adatbázisra
+         randperm = np.random.permutation(len(X_train))
+         X_train, Y_train = X_train[randperm], Y_train[randperm]
+ 
+ 
+-        # Tanítási fázis, epoch-szor megyünk át 1-1 véltelenszerűen kiválasztott mintán.
+         for i in range(epochs):
+-            # Jelen megoldás azt a módszert használja, hogy a megadott
+-            # tanító adatokon végigmegyünk és minden elemet először végigküldünk
+-            # a hálózaton, majd terjeszti vissza a kapott eltérést az
+-            # elvárt eredménytől. Ezt hívjuk SGD-ek (stochastic gradient descent).
++            # mini batch learning implemented here
+             train_err = 0
+-            for k in range(X_train.shape[0]):
+-                network.propagate_forward( X_train[k] )
+-                train_err += network.propagate_backward( Y_train[k], lrate )
++            for k in range(0, X_train.shape[0], batch_size):
++                # k : k+batch_size is one mini_batch
++                network.propagate_forward( np.array(X_train[k:k+batch_size]) )
++                # we add the errors together here and devide by the number of elements at the end
++                train_err += network.propagate_backward( np.array(Y_train[k:k+batch_size]), lrate ).sum()
+             train_err /= X_train.shape[0]
+ 
+-            # validációs fázis
++            # mini batch validation
+             valid_err = 0
+-            o_valid = np.zeros(X_valid.shape[0])
+-            for k in range(X_valid.shape[0]):
+-                o_valid[k] = network.propagate_forward(X_valid[k])
+-                valid_err += (o_valid[k]-Y_valid[k])**2
++            for k in range(0, X_valid.shape[0], batch_size):
++                last_layers = network.propagate_forward(X_valid[k:k+batch_size])
++                valid_err += ((last_layers-Y_valid[k:k+batch_size])**2).sum()
+             valid_err /= X_valid.shape[0]
+ 
+-
+             writer.add_scalar('train', scalar_value=train_err, global_step=i)
+             writer.add_scalar('validation', scalar_value=valid_err, global_step=i)
+             print("%d epoch, train_err: %.4f, valid_err: %.4f" % (i, train_err, valid_err))
+@@ -149,15 +141,16 @@
+         print("\n--- TESZTELÉS ---\n")
+         test_err = 0
+         o_test = np.zeros(X_test.shape[0])
+-        for k in range(X_test.shape[0]):
+-            o_test[k] = network.propagate_forward(X_test[k])
+-            test_err += (o_test[k]-Y_test[k])**2
+-            print(k, X_test[k], '%.2f' % o_test[k], ' (elvart eredmeny: %.2f)' % Y_test[k])
++        for k in range(0, X_test.shape[0], batch_size):
++            o_test[k:k+batch_size] = network.propagate_forward(X_test[k:k+batch_size])
++            test_err += ((o_test[k:k+batch_size]-Y_test[k:k+batch_size])**2).sum()
++            for i in range(batch_size):
++                print(k, X_test[k+i], '%.2f' % o_test[k+i], ' (elvart eredmeny: %.2f)' % Y_test[k+i])
+         test_err /= X_test.shape[0]
+ 
+         plt.scatter(X_test[:,0], X_test[:,1], c=np.round(o_test[:]), cmap=plt.cm.coolwarm)
+ 
+-def decision_boundary_plot(network, X):
++def decision_boundary_plot(network, X, batch_size: int = 10):
+     """
+     Háló kimenet illusztrálása a bemeneti sík "minden" (sok) pontjára
+     Döntési határ közelítő megjelenítése
+@@ -174,8 +167,8 @@
+ 
+     # Háló kimenet kiértékelése a rácspontokban
+     Y_test2 = np.empty(X_test2.shape[0])
+-    for i in range(X_test2.shape[0]):
+-        Y_test2[i] = network.propagate_forward(X_test2[i,:])
++    for i in range(0, X_test2.shape[0], batch_size):
++        Y_test2[i:i+batch_size] = network.propagate_forward(X_test2[i:i+batch_size,:])
+     Y_test2_grid = np.reshape(Y_test2, (res,-1))
+     # Ábrázolás
+     plt.imshow(Y_test2_grid, cmap=plt.cm.coolwarm, origin='lower', extent=[-lims-0.5, lims+.5, -lims-0.5, lims+0.5], vmax=1 ,vmin=-0)
+@@ -199,8 +192,8 @@
+     X_test  = X[int(nb_samples*(1-test_split)):]
+     # Y_test  = Y[int(nb_samples*(1-test_split)):]
+     O_test = np.zeros(X_test.shape[0])
+-    for k in range(X_test.shape[0]):
+-        O_test[k] = network.propagate_forward(X_test[k])
++    for k in range(0, X_test.shape[0], batch_size):
++        O_test[k:k+batch_size] = network.propagate_forward(X_test[k:k+batch_size])
+     plt.scatter(X_test[:,0], X_test[:,1], c=np.round(O_test[:]), cmap=plt.cm.bwr, linewidth=1, edgecolors='w')
+ 
+ decision_boundary_plot(network, X)
